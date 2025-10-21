@@ -1,4 +1,4 @@
-import sys, hashlib, json
+import sys, hashlib, json, requests
 from time import time
 from uuid import uuid4
 from flask import Flask
@@ -10,33 +10,92 @@ class Blockchain(object):
     difficulty_target = "0000" # Define the difficulty target for proof of work
 
     def __init__(self):
+        self.nodes = set() # Store a list of connected nodes (peers)
         self.chain = [] # Initialize the blockchain
         self.current_transactions = [] # Initialize the list of current transactions
 
         genesis_hashed = self.hash_block('genesis_block') # Create the genesis block
 
-        self.append_block(previous_hash=genesis_hashed, nonce=self.proof_of_work(0, genesis_hashed, [])) # Append the genesis block to the chain
+        self.append_block(
+            previous_hash=genesis_hashed, 
+            nonce=self.proof_of_work(0, genesis_hashed, [])
+        ) # Append the genesis block to the chain
     
+    def add_node(self, address):
+        parsed_url = urlparse(address) # Parse the given address (e.g., 'http://127.0.0.1:5001') to extract components
+        self.nodes.add(parsed_url.netloc) # Add the network location (host:port) to the set of known nodes
+
+    def valid_chain(self, chain):
+        last_block = chain[0] # Start validation from the first block in the provided chain
+        current_index = 1 # Start from the second block
+
+        while current_index < len(chain): # Iterate through all remaining blocks in the chain
+            block = chain[current_index] # Get the current block being validated
+
+            if block['previous_hash'] != self.hash_block(last_block): # Check if the current block's 'previous_hash' matches the hash of the previous block
+                return False # If mismatch, the chain is invalid
+            
+            if not self.valid_proof(
+                current_index,  # Index of the current block
+                block['previous_hash'],  # Hash of the previous block
+                json.dumps(block['transactions'], sort_keys=True),  # Sort transactions before hashing for consistency
+                block['nonce'] # Nonce value used for mining
+                ): # Verify the proof of work (validate that the nonce produces a valid hash)
+                return False # If the proof of work is invalid, reject the chain
+            
+            last_block = block # Move to the next block
+            current_index += 1 # Increment index
+
+        return True # If all blocks are valid, return True
+
+    def update_blockchain(self):
+        neighbors = self.nodes # Get the list of neighboring nodes in the network
+        new_chain = None # Temporary variable to store a potentially longer valid chain
+
+        max_length = len(self.chain) # Store the length of the current blockchain
+
+        for node in neighbors: # Iterate through all known nodes
+            try:
+                response = requests.get(f'http://{node}/blockchain') # Request the blockchain from the neighbor node
+
+                if response.status_code == 200: # Check if the node responded successfully
+                    decoded_response = response.json() # Parse the JSON response
+
+                    if decoded_response['length'] > max_length and self.valid_chain(decoded_response['chain']): # Compare lengths and check if the neighbor's chain is valid
+                        # If a longer and valid chain is found, store it
+                        max_length = decoded_response['length']
+                        new_chain = decoded_response['chain']
+
+            except requests.exceptions.RequestException as e: # If a node cannot be reached
+                print(f"Failed to connect to node {node}: {e}")
+
+        if new_chain: # If a longer valid chain was found
+            self.chain = new_chain # Replace the current chain with it
+            return True # Blockchain was updated
+
+        return False # If no longer valid chain found, keep the current one
+
     def hash_block(self, block):
         block_string = json.dumps(block, sort_keys=True).encode() # Encode the block
         return hashlib.sha256(block_string).hexdigest() # Return the SHA-256 hash of the block
 
     def proof_of_work(self, index, previous_hash, transactions):
         nonce = 0 # Start nonce at 0
-        
-        while self.valid_proof(index, previous_hash, transactions, nonce) is False: # Loop until a valid proof is found
+        tx_string = json.dumps(transactions, sort_keys=True) # Hash the transactions to avoid the change of dict keys
+
+        while self.valid_proof(index, previous_hash, tx_string, nonce) is False: # Loop until a valid proof is found
             nonce += 1 # Increment nonce
         return nonce # Return the valid nonce
 
-    def valid_proof(self, index, previous_hash, transactions, nonce):
-        guess = f'{index}{previous_hash}{transactions}{nonce}'.encode() # Create the guess string
+    def valid_proof(self, index, previous_hash, tx_string, nonce):
+        guess = f'{index}{previous_hash}{tx_string}{nonce}'.encode() # Create the guess string
         guess_hash = hashlib.sha256(guess).hexdigest() # Hash the guess
         return guess_hash[:len(self.difficulty_target)] == self.difficulty_target # Check if the hash meets the difficulty target
     
-    def append_block(self, nonce, previous_hash=None):
+    def append_block(self, nonce, timestamp = None, previous_hash=None):
         block = {
-            'index': len(self.chain) + 1, # Set the block index
-            'timestamp': time(), # Set the block timestamp
+            'index': len(self.chain), # Set the block index
+            'timestamp': timestamp or time(), # Set the block timestamp
             'transactions': self.current_transactions, # Set the block transactions
             'nonce': nonce, # Set the block nonce
             'previous_hash': previous_hash or self.hash_block(self.chain[-1]), # Set the previous hash or hash of the last block
@@ -100,8 +159,8 @@ def new_transactions():
     values = request.get_json() # Extract the JSON data from the request body
 
     required_fields = ['sender','recipient','amount'] # Define the required fields for a transaction
-    if not all(k in values for k in required_fields):
-        return ('Missing fields', 400) # If any required field is missing, return an error 400 (Bad Request)
+    if not all(k in values for k in required_fields): # If any required field is missing
+        return ('Missing fields', 400) # Return an error 400 (Bad Request)
     
     index = blockchain.add_transaction(
         values['sender'], # Sender address
@@ -114,6 +173,40 @@ def new_transactions():
     }
 
     return jsonify(response), 201
+
+@app.route('/nodes/add', methods=['POST'])
+def add_node():
+    values = request.get_json()
+    nodes = values.get('nodes')
+
+    if nodes is None:
+        return ('Error, missing node(s) info', 400)
+    
+    for node in nodes:
+        blockchain.add_node(node)
+    
+    response = {
+        'message': 'New node has beed added',
+        'nodes': list(blockchain.nodes)
+    }
+
+    return jsonify(response), 201
+
+@app.route('/nodes/sync', methods=['GET'])
+def sync_nodes():
+    updated = blockchain.update_blockchain()
+    if updated:
+        response = {
+            'message': 'Blockchain has beed updated',
+            'blockchain': blockchain.chain
+        }
+    else:
+        response = {
+            'message': 'Blockchain is already up to date',
+            'blockchain': blockchain.chain
+        }
+                
+    return jsonify(response), 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(sys.argv[1]))
