@@ -176,34 +176,35 @@ def new_transactions():
 
 @app.route('/nodes/add', methods=['POST'])
 def add_node():
-    values = request.get_json()
-    nodes = values.get('nodes')
+    values = request.get_json() # Get the JSON data sent in the POST request body
+    nodes = values.get('nodes') # Extract the 'nodes' field from the JSON payload
 
-    if nodes is None:
+    if nodes is None: # If no nodes were provided, return an error message with HTTP status 400 (Bad Request)
         return ('Error, missing node(s) info', 400)
     
-    for node in nodes:
+    for node in nodes: # Loop through all nodes provided and add each one to the blockchain’s list of nodes
         blockchain.add_node(node)
     
     response = {
         'message': 'New node has beed added',
-        'nodes': list(blockchain.nodes)
+        'nodes': list(blockchain.nodes) # Show the full list of connected nodes
     }
 
     return jsonify(response), 201
 
 @app.route('/nodes/sync', methods=['GET'])
 def sync_nodes():
-    updated = blockchain.update_blockchain()
-    if updated:
+    updated = blockchain.update_blockchain() # Attempt to synchronize this node’s blockchain with the other connected nodes
+
+    if updated: # If the blockchain was updated (a longer valid chain was found)
         response = {
             'message': 'Blockchain has beed updated',
-            'blockchain': blockchain.chain
+            'blockchain': blockchain.chain # Return the updated blockchain data
         }
     else:
         response = {
             'message': 'Blockchain is already up to date',
-            'blockchain': blockchain.chain
+            'blockchain': blockchain.chain # Return the updated blockchain data
         }
                 
     return jsonify(response), 200
